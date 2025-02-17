@@ -3,6 +3,20 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 
+#define U16_FROM_BUF(buf, high)   (((buf)[(high)] << 8) | (buf)[(high) + 1])
+
+#define PMSA_NUM_REG 32
+#define ID_SIZE (2)
+#define REG_ID_HIGH (0x00)
+#define REG_PM1_HIGH (0x04)
+#define REG_PM1_LOW (0x05)
+#define REG_PM2P5_HIGH (0x06)
+#define REG_PM2P5_LOW (0x07)
+#define REG_PM10_HIGH (0x08)
+#define REG_PM10_LOW (0x09)
+#define REG_CRC_HIGH (0x1E)
+#define REG_CRC_LOW (0x1F)
+
 static const struct iio_chan_spec pmsa_channels[] = {
 	{
 		.type = IIO_CONCENTRATION,
@@ -29,7 +43,16 @@ static const struct of_device_id pmsa_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, pmsa_of_match);
 
-#define PMSA_NUM_REG 31
+static bool valid_crc(char *buf){
+   uint16_t sum = 0;
+   uint16_t expected_sum = U16_FROM_BUF(buf, REG_CRC_HIGH);
+   const size_t CRC_SIZE = 2;
+   for (size_t i = 0; i < PMSA_NUM_REG - CRC_SIZE; i++)
+   {
+      sum += buf[i]; 
+   }
+   return sum == expected_sum;
+}
 
 static int pmsa_read_raw(struct iio_dev *indio_dev,
       struct iio_chan_spec const *chan,int max_len,
@@ -41,15 +64,20 @@ static int pmsa_read_raw(struct iio_dev *indio_dev,
    char recv_buf[PMSA_NUM_REG] = {0};
    status = i2c_master_recv(data->client, recv_buf, PMSA_NUM_REG);
    if (status != PMSA_NUM_REG){
-      pr_info("Failed to read data from pmsa");
+      pr_info("Failed to read data from pmsa\n");
+      *val_len = 0;
+   }else{
+      if (valid_crc((recv_buf)))
+      {
+         vals[0] = U16_FROM_BUF(recv_buf, REG_PM1_HIGH);
+         vals[1] = U16_FROM_BUF(recv_buf, REG_PM2P5_HIGH);
+         vals[2] = U16_FROM_BUF(recv_buf, REG_PM10_HIGH);
+         *val_len = 3;
+      }else {
+         pr_info("CRC mismatch\n");
+         *val_len = 0;
+      }
    }
-   
-   vals[0] = (recv_buf[4] << 8) | (recv_buf[5]); // TODO: Replace these indexes with defines
-   vals[1] = (recv_buf[6] << 8) | (recv_buf[7]); // TODO: Replace these indexes with defines
-   vals[2] = (recv_buf[8] << 8) | (recv_buf[9]); // TODO: Replace these indexes with defines
-   *val_len = 3;
-
-   // TODO: Validate data with CRC
    
    return IIO_VAL_INT_MULTIPLE;
 }
@@ -61,8 +89,19 @@ static const struct iio_info pmsa_info = {
 static int pmsa_probe(struct i2c_client *client, const struct i2c_device_id *){
    struct pmsa_client *data;
    int status;
-   status = i2c_smbus_read_byte_data(client, 0x01);
-   // TODO: Verify ID
+   char recv_buf[PMSA_NUM_REG];
+   status = i2c_master_recv(client, recv_buf, PMSA_NUM_REG);
+   if (!valid_crc(recv_buf)){
+      pr_info("CRC mismatch\n");
+      return -ENODEV;
+   }
+
+   uint16_t expected_id = (0x42 << 8) | (0x4d);
+   uint16_t actual_id = U16_FROM_BUF(recv_buf, REG_ID_HIGH);
+   if (expected_id != actual_id){
+      pr_info("ID:%d does not match expected value\n", actual_id);
+      return -ENODEV;
+   }
 
    struct iio_dev *indio_dev;
    indio_dev = devm_iio_device_alloc(&client->dev, sizeof(*data));
@@ -71,9 +110,9 @@ static int pmsa_probe(struct i2c_client *client, const struct i2c_device_id *){
 
    data = iio_priv(indio_dev);
    data->client = client;
-
+   
    indio_dev->info = &pmsa_info;
-   indio_dev->name = "pmsa"; // This should be derived from somehwere else
+   indio_dev->name = client->name;
    indio_dev->modes = INDIO_DIRECT_MODE;
    indio_dev->channels = pmsa_channels;
    indio_dev->num_channels = ARRAY_SIZE(pmsa_channels);
@@ -83,7 +122,7 @@ static int pmsa_probe(struct i2c_client *client, const struct i2c_device_id *){
 
 void pmsa_remove(struct i2c_client *client){
    // TODO: May need to free i2c or iio allocated mem
-	pr_info("PMSA Remove");
+	pr_info("PMSA Remove\n");
 }
 
 static struct i2c_driver pmsa_driver = {
