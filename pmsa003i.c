@@ -25,7 +25,7 @@ static const struct iio_chan_spec pmsa_channels[] = {
 }; 
 struct pmsa_client {
    struct i2c_client *client;
-   // May need a lock to handle simultanious attempts to use client
+   struct mutex lock;
 };
 
 static const struct i2c_device_id pmsa003i_ids[] = {
@@ -62,7 +62,9 @@ static int pmsa_read_raw(struct iio_dev *indio_dev,
    int status;
    
    char recv_buf[PMSA_NUM_REG] = {0};
+   mutex_lock(&data->lock);
    status = i2c_master_recv(data->client, recv_buf, PMSA_NUM_REG);
+   mutex_unlock(&data->lock);
    if (status != PMSA_NUM_REG){
       pr_info("Failed to read data from pmsa\n");
       *val_len = 0;
@@ -110,6 +112,7 @@ static int pmsa_probe(struct i2c_client *client, const struct i2c_device_id *){
 
    data = iio_priv(indio_dev);
    data->client = client;
+   mutex_init(&data->lock);
    
    indio_dev->info = &pmsa_info;
    indio_dev->name = client->name;
@@ -120,11 +123,6 @@ static int pmsa_probe(struct i2c_client *client, const struct i2c_device_id *){
 	return devm_iio_device_register(&client->dev, indio_dev);
 }
 
-void pmsa_remove(struct i2c_client *client){
-   // TODO: May need to free i2c or iio allocated mem
-	pr_info("PMSA Remove\n");
-}
-
 static struct i2c_driver pmsa_driver = {
       .driver = {
               .name   = "pmsa003i",
@@ -132,7 +130,6 @@ static struct i2c_driver pmsa_driver = {
       },
       .id_table       = pmsa003i_ids,
       .probe          = pmsa_probe,
-      .remove         = pmsa_remove,
 };
 
 module_i2c_driver(pmsa_driver);
